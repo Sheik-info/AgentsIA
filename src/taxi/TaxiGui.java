@@ -96,10 +96,6 @@ class TaxiGui extends JFrame {
             return;
         }
 
-        JOptionPane.showMessageDialog(this,
-                nbTaxis+" taxi(s) et "+nbClients+" client(s) au total.\nVoir la console pour suivre la simulation.",
-                "Simulation demarree", JOptionPane.INFORMATION_MESSAGE);
-
         dispose();
     }
 
