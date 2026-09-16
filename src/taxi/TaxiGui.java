@@ -1,221 +1,114 @@
 package taxi;
 
-import javax.swing.*;
+import jade.wrapper.AgentController;
+import jade.wrapper.ContainerController;
+import jade.wrapper.ControllerException;
+
 import java.awt.*;
-import java.util.ArrayList;
-import java.util.List;
+import java.awt.event.*;
+import javax.swing.*;
 
-public class TaxiGui extends JFrame {
+/**
+ * Fenetre de configuration de la simulation.
+ * Ouverte par le premier TaxiAgent lance (celui demarre "a la main" avec JADE,
+ * exactement comme BookSellerAgent ouvre BookSellerGui dans son setup()).
+ * Permet de choisir le nombre total de taxis (max 6) et de clients (max 12),
+ * puis cree les agents manquants via le conteneur de l'agent qui l'a ouverte.
+ * Les taxis crees ici recoivent l'argument "worker" pour ne pas rouvrir
+ * une seconde fenetre de configuration.
+ */
+class TaxiGui extends JFrame {
 
-    // Liste des taxis présents sur la carte
-    private final List<AgentPosition> taxis =
-            new ArrayList<>();
+    private static final int MAX_TAXIS = 6;
+    private static final int MAX_CLIENTS = 12;
 
-    // Liste des clients présents sur la carte
-    private final List<AgentPosition> clients =
-            new ArrayList<>();
+    private TaxiAgent myAgent;
 
-    // Zone graphique représentant la carte
-    private final MapPanel mapPanel;
+    // Le taxi qui a ouvert cette fenetre compte deja pour 1 taxi
+    private int taxiCount = 1;
+    private int clientCount = 0;
 
-    public TaxiGui() {
+    private JSpinner taxiSpinner;
+    private JSpinner clientSpinner;
+    private JButton startButton;
 
-        // Titre de la fenêtre
-        super("Taxi Simulation");
+    TaxiGui(TaxiAgent a) {
+        super(a.getLocalName()+" - Configuration de la simulation");
+        myAgent = a;
 
-        /*
-         * Lorsque l'utilisateur ferme la fenêtre,
-         * on ferme uniquement la GUI.
-         *
-         * IMPORTANT :
-         * cela ne tue PAS les agents JADE.
-         */
-        setDefaultCloseOperation(
-                JFrame.DISPOSE_ON_CLOSE
-        );
+        JPanel form = new JPanel(new GridLayout(2, 2, 10, 10));
+        form.setBorder(BorderFactory.createEmptyBorder(15, 15, 5, 15));
 
-        /*
-         * La carte occupe environ la moitié
-         * de l'écran grâce à une taille fixe.
-         */
-        mapPanel = new MapPanel();
+        form.add(new JLabel("Nombre de taxis (1 a "+MAX_TAXIS+") :"));
+        taxiSpinner = new JSpinner(new SpinnerNumberModel(1, 1, MAX_TAXIS, 1));
+        form.add(taxiSpinner);
 
-        mapPanel.setPreferredSize(
-                new Dimension(700, 500)
-        );
+        form.add(new JLabel("Nombre de clients (1 a "+MAX_CLIENTS+") :"));
+        clientSpinner = new JSpinner(new SpinnerNumberModel(1, 1, MAX_CLIENTS, 1));
+        form.add(clientSpinner);
 
-        getContentPane().add(
-                mapPanel,
-                BorderLayout.CENTER
-        );
+        getContentPane().add(form, BorderLayout.CENTER);
 
+        startButton = new JButton("Demarrer la simulation");
+        startButton.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent ev) {
+                startSimulation();
+            }
+        });
+        JPanel south = new JPanel();
+        south.add(startButton);
+        getContentPane().add(south, BorderLayout.SOUTH);
+
+        // Ne fait que fermer cette fenetre de configuration, pas la plateforme JADE
+        setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
         setResizable(false);
     }
 
     /**
-     * Ajoute un taxi à la carte.
+     Cree les taxis et clients manquants (ce taxi-ci compte deja pour 1)
+     via le conteneur JADE de l'agent qui a ouvert cette fenetre.
      */
-    public void addTaxi(
-            String name,
-            int x,
-            int y
-    ) {
+    private void startSimulation() {
+        int nbTaxis = (Integer) taxiSpinner.getValue();
+        int nbClients = (Integer) clientSpinner.getValue();
+        int taxisToCreate = Math.max(0, nbTaxis - 1);
 
-        taxis.add(
-                new AgentPosition(
-                        name,
-                        x,
-                        y
-                )
-        );
+        try {
+            ContainerController container = myAgent.getContainerController();
 
-        // Redessine la carte
-        mapPanel.repaint();
+            for (int i = 0; i < taxisToCreate; i++) {
+                taxiCount++;
+                Object[] workerArgs = { "worker" };
+                AgentController taxi = container.createNewAgent(
+                        "taxi"+taxiCount, "taxi.TaxiAgent", workerArgs);
+                taxi.start();
+            }
+            for (int i = 0; i < nbClients; i++) {
+                clientCount++;
+                AgentController client = container.createNewAgent(
+                        "client"+clientCount, "taxi.ClientAgent", null);
+                client.start();
+            }
+        }
+        catch (ControllerException ex) {
+            JOptionPane.showMessageDialog(this, "Erreur au lancement des agents : "+ex.getMessage(),
+                    "Erreur", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        JOptionPane.showMessageDialog(this,
+                nbTaxis+" taxi(s) et "+nbClients+" client(s) au total.\nVoir la console pour suivre la simulation.",
+                "Simulation demarree", JOptionPane.INFORMATION_MESSAGE);
+
+        dispose();
     }
 
-    /**
-     * Ajoute un client à la carte.
-     */
-    public void addClient(
-            String name,
-            int x,
-            int y
-    ) {
-
-        clients.add(
-                new AgentPosition(
-                        name,
-                        x,
-                        y
-                )
-        );
-
-        mapPanel.repaint();
-    }
-
-    /**
-     * Affiche la fenêtre au centre de l'écran.
-     */
     public void showGui() {
-
         pack();
-
-        Dimension screenSize =
-                Toolkit.getDefaultToolkit()
-                        .getScreenSize();
-
-        int centerX =
-                screenSize.width / 2;
-
-        int centerY =
-                screenSize.height / 2;
-
-        setLocation(
-                centerX - getWidth() / 2,
-                centerY - getHeight() / 2
-        );
-
+        Dimension screenSize = Toolkit.getDefaultToolkit().getScreenSize();
+        int centerX = (int) screenSize.getWidth() / 2;
+        int centerY = (int) screenSize.getHeight() / 2;
+        setLocation(centerX - getWidth() / 2, centerY - getHeight() / 2);
         setVisible(true);
-    }
-
-    /**
-     * Représente la position d'un agent.
-     */
-    private static class AgentPosition {
-
-        String name;
-        int x;
-        int y;
-
-        AgentPosition(
-                String name,
-                int x,
-                int y
-        ) {
-            this.name = name;
-            this.x = x;
-            this.y = y;
-        }
-    }
-
-    /**
-     * Panneau qui dessine la carte.
-     */
-    private class MapPanel extends JPanel {
-
-        @Override
-        protected void paintComponent(Graphics g) {
-
-            super.paintComponent(g);
-
-            /*
-             * Fond noir de la carte.
-             */
-            g.setColor(Color.BLACK);
-
-            g.fillRect(
-                    0,
-                    0,
-                    getWidth(),
-                    getHeight()
-            );
-
-            /*
-             * Dessin des taxis.
-             *
-             * Les taxis sont représentés en ROUGE.
-             */
-            for (AgentPosition taxi : taxis) {
-
-                g.setColor(Color.RED);
-
-                g.fillOval(
-                        taxi.x,
-                        taxi.y,
-                        20,
-                        20
-                );
-
-                /*
-                 * Nom du taxi au-dessus
-                 * de sa position.
-                 */
-                g.setColor(Color.WHITE);
-
-                g.drawString(
-                        taxi.name,
-                        taxi.x,
-                        taxi.y - 5
-                );
-            }
-
-            /*
-             * Dessin des clients.
-             *
-             * Les clients sont représentés en JAUNE.
-             */
-            for (AgentPosition client : clients) {
-
-                g.setColor(Color.YELLOW);
-
-                g.fillOval(
-                        client.x,
-                        client.y,
-                        15,
-                        15
-                );
-
-                /*
-                 * Nom du client.
-                 */
-                g.setColor(Color.WHITE);
-
-                g.drawString(
-                        client.name,
-                        client.x,
-                        client.y - 5
-                );
-            }
-        }
     }
 }

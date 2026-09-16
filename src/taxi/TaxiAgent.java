@@ -1,253 +1,226 @@
 package taxi;
 
 import jade.core.Agent;
-import jade.core.behaviours.CyclicBehaviour;
-import jade.domain.DFService;
-import jade.domain.FIPAAgentManagement.DFAgentDescription;
-import jade.domain.FIPAAgentManagement.ServiceDescription;
-import jade.domain.FIPAException;
+import jade.core.AID;
+import jade.core.behaviours.*;
 import jade.lang.acl.ACLMessage;
 import jade.lang.acl.MessageTemplate;
+import jade.domain.DFService;
+import jade.domain.FIPAException;
+import jade.domain.FIPAAgentManagement.DFAgentDescription;
+import jade.domain.FIPAAgentManagement.ServiceDescription;
 
+import java.util.*;
+
+/**
+ * Agent taxi.
+ * - Repond aux demandes de course (CFP) des clients avec sa distance.
+ * - Accepte les clients tant qu'il reste de la place.
+ * - Demarre un compte a rebours de 60s des le premier client monte a bord
+ *   le taxi part soit quand il est plein (4 places), soit au bout des 60s,
+ *   selon ce qui arrive en premier.
+ * - Simule le trajet puis informe les passagers de leur arrivee.
+ */
 public class TaxiAgent extends Agent {
 
-    // Nombre de places disponibles dans le taxi
-    private int nbPlace;
+    // Nombre maximal de places dans le taxi
+    private static final int CAPACITY = 4;
+    // Delai maximal d'attente avant le depart en ms  60 secondes
+    private static final long WAIT_TIME = 60000;
+    // Duree simulee du trajet en ms
+    private static final long TRIP_DURATION = 10000;
 
-    // Prix d'une place
-    private int pricePlace;
+    private double posX, posY;
 
-    // Position du taxi sur la carte
-    private int x;
-    private int y;
+    // Liste des clients actuellement a bord
+    private List<AID> passengers = new ArrayList<AID>();
 
-    // Interface graphique globale
-    private static TaxiGui gui;
+    private boolean busy = false;
+
+    // Reference vers le compte a rebours en cours, pour pouvoir l'annuler
+    // si le taxi se remplit avant l'expiration des 60 secondes
+    private DepartureWaker departureWaker;
 
     protected void setup() {
+        // Position aleatoire de depart du taxi
+        posX = Math.random() * 100;
+        posY = Math.random() * 100;
 
-        /*
-         * Récupération des paramètres donnés lors du lancement
-         *
-         * Arguments :
-         * args[0] = prix
-         * args[1] = position X
-         * args[2] = position Y
-         */
 
-        Object[] args = getArguments();
-
-        if (args != null && args.length >= 3) {
-            pricePlace = Integer.parseInt(args[0].toString());
-            x = Integer.parseInt(args[1].toString());
-            y = Integer.parseInt(args[2].toString());
-        }
-        else {
-            // Valeurs par défaut
-            pricePlace = 10;
-            x = 100;
-            y = 100;
-        }
-
-        // Chaque taxi possède initialement 4 places
-        nbPlace = 4;
-
-        /*
-         * Création de la GUI uniquement pour le premier taxi.
-         *
-         * On ne veut PAS une fenêtre par taxi.
-         */
-        if (gui == null) {
-            gui = new TaxiGui();
-            gui.showGui();
-        }
-
-        // Ajout du taxi à la carte
-        gui.addTaxi(
-                getLocalName(),
-                x,
-                y
-        );
-
-        // Création de la description du service
+        // Enregistrement du service "taxi-service" aupres du DF
         DFAgentDescription dfd = new DFAgentDescription();
-
         dfd.setName(getAID());
-
         ServiceDescription sd = new ServiceDescription();
-
-        sd.setType("Taxi");
-        sd.setName("JADE-taxi-course");
-
+        sd.setType("taxi-service");
+        sd.setName("JADE-taxi-trading");
         dfd.addServices(sd);
-
         try {
-            // Enregistrement du taxi dans le DF
             DFService.register(this, dfd);
         }
         catch (FIPAException fe) {
             fe.printStackTrace();
         }
 
-        // Behaviour qui répond aux demandes de prix
-        addBehaviour(new OfferRequestsServer());
+        // Repond aux demandes de course des clients
+        addBehaviour(new RequestsServer());
+        // Gere l'acceptation d'une course par un client (embarquement)
+        addBehaviour(new BoardingServer());
 
-        // Behaviour qui traite les réservations
-        addBehaviour(new PurchaseOrdersServer());
-
-        System.out.println(
-                "Taxi " + getLocalName()
-                        + " created at (" + x + ", " + y + ")"
-                        + " - price: " + pricePlace
-        );
-    }
-
-    /**
-     * Behaviour qui répond aux CFP.
-     *
-     * Le client demande :
-     *
-     * "Quel est le prix d'une place ?"
-     */
-    private class OfferRequestsServer extends CyclicBehaviour {
-
-        public void action() {
-
-            MessageTemplate mt =
-                    MessageTemplate.MatchPerformative(
-                            ACLMessage.CFP
-                    );
-
-            ACLMessage msg = myAgent.receive(mt);
-
-            if (msg != null) {
-
-                ACLMessage reply = msg.createReply();
-
-                /*
-                 * On vérifie seulement s'il reste des places.
-                 *
-                 * IMPORTANT :
-                 * On ne retire PAS encore de place.
-                 */
-                if (nbPlace > 0) {
-
-                    reply.setPerformative(
-                            ACLMessage.PROPOSE
-                    );
-
-                    reply.setContent(
-                            String.valueOf(pricePlace)
-                    );
-
-                    System.out.println(
-                            getLocalName()
-                                    + " proposes "
-                                    + pricePlace
-                                    + " to "
-                                    + msg.getSender().getLocalName()
-                    );
-
-                }
-                else {
-
-                    reply.setPerformative(
-                            ACLMessage.REFUSE
-                    );
-
-                    reply.setContent(
-                            "not-available"
-                    );
-                }
-
-                myAgent.send(reply);
-            }
-            else {
-                block();
-            }
+        // Seul le taxi lance "manuellement" (sans argument) ouvre la fenetre de
+        // configuration TaxiGui, qui permet ensuite de creer le reste des taxis
+        // et des clients. Les taxis crees depuis cette fenetre recoivent
+        // l'argument "worker" et ne doivent pas rouvrir de fenetre.
+        Object[] args = getArguments();
+        boolean isWorker = (args != null && args.length > 0 && "worker".equals(args[0]));
+        if (!isWorker) {
+            TaxiGui gui = new TaxiGui(this);
+            gui.showGui();
         }
     }
 
-    /**
-     * Behaviour qui traite les réservations.
-     *
-     * La place est retirée uniquement lorsqu'un client
-     * accepte réellement la proposition.
-     */
-    private class PurchaseOrdersServer extends CyclicBehaviour {
-
-        public void action() {
-
-            MessageTemplate mt =
-                    MessageTemplate.MatchPerformative(
-                            ACLMessage.ACCEPT_PROPOSAL
-                    );
-
-            ACLMessage msg = myAgent.receive(mt);
-
-            if (msg != null) {
-
-                ACLMessage reply = msg.createReply();
-
-                if (nbPlace > 0) {
-
-                    // Une vraie réservation est effectuée
-                    nbPlace--;
-
-                    reply.setPerformative(
-                            ACLMessage.INFORM
-                    );
-
-                    reply.setContent(
-                            "reservation-successful"
-                    );
-
-                    System.out.println(
-                            getLocalName()
-                                    + " reserved a place for "
-                                    + msg.getSender().getLocalName()
-                                    + " - remaining places: "
-                                    + nbPlace
-                    );
-
-                }
-                else {
-
-                    reply.setPerformative(
-                            ACLMessage.FAILURE
-                    );
-
-                    reply.setContent(
-                            "not-available"
-                    );
-                }
-
-                myAgent.send(reply);
-            }
-            else {
-                block();
-            }
-        }
-    }
-
-    /**
-     * Suppression de l'agent.
-     *
-     * On désenregistre le taxi du DF.
-     */
     protected void takeDown() {
-
         try {
             DFService.deregister(this);
         }
         catch (FIPAException fe) {
             fe.printStackTrace();
         }
+        System.out.println("Taxi "+getLocalName()+" termine.");
+    }
 
-        System.out.println(
-                "Taxi-agent "
-                        + getLocalName()
-                        + " terminating."
-        );
+    // Distance euclidienne entre le taxi et une position donnee
+    private double distanceTo(double x, double y) {
+        double dx = posX - x;
+        double dy = posY - y;
+        return Math.sqrt(dx*dx + dy*dy);
+    }
+
+    /**
+     Repond aux CFP envoyes par les clients avec la distance du taxi,
+     sauf si le taxi est complet ou deja en course : dans ce cas REFUSE.
+     */
+    private class RequestsServer extends CyclicBehaviour {
+        public void action() {
+            MessageTemplate mt = MessageTemplate.MatchPerformative(ACLMessage.CFP);
+            ACLMessage msg = myAgent.receive(mt);
+            if (msg != null) {
+                ACLMessage reply = msg.createReply();
+                if (!busy && passengers.size() < CAPACITY) {
+                    try {
+                        String[] coords = msg.getContent().split(",");
+                        double cx = Double.parseDouble(coords[0]);
+                        double cy = Double.parseDouble(coords[1]);
+                        double dist = distanceTo(cx, cy);
+                        reply.setPerformative(ACLMessage.PROPOSE);
+                        reply.setContent(String.valueOf(dist));
+                    }
+                    catch (Exception e) {
+                        reply.setPerformative(ACLMessage.REFUSE);
+                        reply.setContent("bad-request");
+                    }
+                }
+                else {
+                    reply.setPerformative(ACLMessage.REFUSE);
+                    reply.setContent("full");
+                }
+                myAgent.send(reply);
+            }
+            else {
+                block();
+            }
+        }
+    }  // Fin de RequestsServer
+
+    /**
+     Gere l'embarquement des clients qui acceptent la proposition du taxi.
+     */
+    private class BoardingServer extends CyclicBehaviour {
+        public void action() {
+            MessageTemplate mt = MessageTemplate.MatchPerformative(ACLMessage.ACCEPT_PROPOSAL);
+            ACLMessage msg = myAgent.receive(mt);
+            if (msg != null) {
+                ACLMessage reply = msg.createReply();
+                if (!busy && passengers.size() < CAPACITY) {
+                    passengers.add(msg.getSender());
+                    reply.setPerformative(ACLMessage.INFORM);
+                    reply.setContent("boarded");
+                    System.out.println("Taxi "+getLocalName()+" : "+msg.getSender().getLocalName()+
+                            " est monte a bord ("+passengers.size()+"/"+CAPACITY+")");
+
+                    // Demarre le compte a rebours de 60s au premier client
+                    if (passengers.size() == 1) {
+                        departureWaker = new DepartureWaker(myAgent, WAIT_TIME);
+                        myAgent.addBehaviour(departureWaker);
+                    }
+
+                    // Depart immediat si le taxi est complet
+                    if (passengers.size() == CAPACITY) {
+                        if (departureWaker != null) {
+                            myAgent.removeBehaviour(departureWaker);
+                        }
+                        depart();
+                    }
+                }
+                else {
+                    // Le taxi s'est rempli ou est parti entre-temps
+                    reply.setPerformative(ACLMessage.FAILURE);
+                    reply.setContent("full");
+                }
+                myAgent.send(reply);
+            }
+            else {
+                block();
+            }
+        }
+    }  // Fin de BoardingServer
+
+    /**
+     Comportement de type "reveil" qui declenche le depart du taxi
+     si celui-ci n'est pas complet au bout de 60 secondes.
+     */
+    private class DepartureWaker extends WakerBehaviour {
+        public DepartureWaker(Agent a, long timeout) {
+            super(a, timeout);
+        }
+        protected void onWake() {
+            if (!passengers.isEmpty() && !busy) {
+                System.out.println("Taxi "+getLocalName()+" : delai de 60s ecoule, depart avec "+
+                        passengers.size()+" passager(s)");
+                depart();
+            }
+        }
+    }
+
+    // Demarre la course : le taxi n'accepte plus de nouveaux clients pendant le trajet
+    private void depart() {
+        busy = true;
+        System.out.println("Taxi "+getLocalName()+" en route avec "+passengers.size()+" passager(s)");
+        addBehaviour(new TripBehaviour(this, TRIP_DURATION));
+    }
+
+    /**
+     Simule la duree du trajet puis notifie les passagers de leur arrivee.
+     Le taxi redevient ensuite disponible pour de nouvelles courses.
+     */
+    private class TripBehaviour extends WakerBehaviour {
+        public TripBehaviour(Agent a, long timeout) {
+            super(a, timeout);
+        }
+        protected void onWake() {
+            ACLMessage arrived = new ACLMessage(ACLMessage.INFORM);
+            for (AID client : passengers) {
+                arrived.addReceiver(client);
+            }
+            arrived.setContent("arrived");
+            myAgent.send(arrived);
+            System.out.println("Taxi "+getLocalName()+" : "+passengers.size()+
+                    " passager(s) arrive(s) a destination");
+
+            // Le taxi se vide, se repositionne et redevient disponible
+            passengers.clear();
+            busy = false;
+            posX = Math.random() * 100;
+            posY = Math.random() * 100;
+        }
     }
 }

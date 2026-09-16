@@ -1,142 +1,173 @@
 package taxi;
 
-import jade.core.AID;
 import jade.core.Agent;
-import jade.core.behaviours.Behaviour;
-import jade.core.behaviours.TickerBehaviour;
-import jade.domain.DFService;
-import jade.domain.FIPAAgentManagement.DFAgentDescription;
-import jade.domain.FIPAAgentManagement.ServiceDescription;
-import jade.domain.FIPAException;
+import jade.core.AID;
+import jade.core.behaviours.*;
 import jade.lang.acl.ACLMessage;
 import jade.lang.acl.MessageTemplate;
-import jade.lang.acl.UnreadableException;
+import jade.domain.DFService;
+import jade.domain.FIPAException;
+import jade.domain.FIPAAgentManagement.DFAgentDescription;
+import jade.domain.FIPAAgentManagement.ServiceDescription;
 
+/**
+ * Agent representant un client.
+ * Comportement simple : il cherche tous les taxis disponibles, choisit
+ * celui qui est le plus proche (distance minimale) et monte a bord.
+ * S'il n'y a aucun taxi disponible, ou si la place lui echappe
+ * (taxi complet entre-temps), il recommence la recherche un peu plus tard.
+ * Une fois a bord, il attend simplement la notification d'arrivee.
+ */
 public class ClientAgent extends Agent {
-    private Integer[] startPoint;
-    private Integer[] endPoint;
-    private String travelPoints;
-    private AID[] taxiAgents; // The list of known seller agents
+
+    // Delai entre deux tentatives si aucun taxi n'est disponible / trouve (ms)
+    private static final long RETRY_DELAY = 5000;
+
+    // Position du client sur la meme grille virtuelle que les taxis
+    private double posX, posY;
 
     protected void setup() {
-        addBehaviour(new TickerBehaviour(this, 60000) {
-            protected void onTick() {
-                System.out.println("Trying to call taxi from " + startPoint);
-                // Update the list of taxi agents (access to directory facilitator)
-                DFAgentDescription template = new DFAgentDescription();
-                ServiceDescription sd = new ServiceDescription();
-                sd.setType("book-selling");
-                template.addServices(sd);
-                try {
-                    DFAgentDescription[] result = DFService.search(myAgent, template);
-                    System.out.println("Found the following seller agents:");
-                    taxiAgents = new AID[result.length];
-                    for (int i = 0; i < result.length; ++i) {
-                        taxiAgents[i] = result[i].getName();
-                        System.out.println(taxiAgents[i].getName());
-                    }
-                } catch (FIPAException fe) {
-                    fe.printStackTrace();
-                }
+        posX = Math.random() * 100;
+        posY = Math.random() * 100;
 
-                // Perform the request
-                myAgent.addBehaviour(new CallTaxi());
-            }
-        });
+        System.out.println("Client "+getLocalName()+" pret. Position ("+
+                String.format("%.1f", posX)+","+String.format("%.1f", posY)+")");
+
+        addBehaviour(new BookingPerformer());
     }
 
-    private class CallTaxi extends Behaviour {
-        private AID bestSeller; // The agent who provides the best offer
-        private int bestPrice;  // The best offered price
-        private int repliesCnt = 0; // The counter of replies from seller agents
-        private MessageTemplate mt; // The template to receive replies
-        private int step = 0;   // State of the agent
+    protected void takeDown() {
+        System.out.println("Client "+getLocalName()+" a termine son trajet.");
+    }
+
+    /**
+     Comportement qui recherche le taxi le plus proche, reserve une place
+     et attend la notification d'arrivee a destination.
+     */
+    private class BookingPerformer extends Behaviour {
+        private AID[] taxiAgents;
+        private AID bestTaxi;
+        private double bestDistance;
+        private int repliesCnt = 0;
+        private MessageTemplate mt;
+        private int step = 0;
 
         public void action() {
             switch (step) {
-                // Seeking for a taxi state -> propose (PR)
                 case 0:
-                    ACLMessage cfp = new ACLMessage(ACLMessage.CFP);    // Send the cfp to all taxis
-                    for (int i = 0; i < taxiAgents.length; ++i) {
-                        cfp.addReceiver(taxiAgents[i]);
+                    // Recherche des agents taxi actuellement enregistres
+                    DFAgentDescription template = new DFAgentDescription();
+                    ServiceDescription sd = new ServiceDescription();
+                    sd.setType("taxi-service");
+                    template.addServices(sd);
+                    try {
+                        DFAgentDescription[] result = DFService.search(myAgent, template);
+                        taxiAgents = new AID[result.length];
+                        for (int i = 0; i < result.length; ++i) {
+                            taxiAgents[i] = result[i].getName();
+                        }
                     }
-                    cfp.setContent(travelPoints);
-                    cfp.setConversationId("taxi-course");
-                    cfp.setReplyWith("cfp"+System.currentTimeMillis()); // Unique value
-                    myAgent.send(cfp);
-                    // Prepare the template to get proposals
-                    mt = MessageTemplate.and(MessageTemplate.MatchConversationId("taxi-course"),
-                            MessageTemplate.MatchInReplyTo(cfp.getReplyWith()));
+                    catch (FIPAException fe) {
+                        fe.printStackTrace();
+                        taxiAgents = new AID[0];
+                    }
 
-                    step = 1;
+                    if (taxiAgents.length == 0) {
+                        // Aucun taxi enregistre pour le moment : nouvelle tentative plus tard
+                        block(RETRY_DELAY);
+                    }
+                    else {
+                        // Demande de course envoyee a tous les taxis connus
+                        ACLMessage cfp = new ACLMessage(ACLMessage.CFP);
+                        for (int i = 0; i < taxiAgents.length; ++i) {
+                            cfp.addReceiver(taxiAgents[i]);
+                        }
+                        cfp.setContent(posX+","+posY);
+                        cfp.setConversationId("taxi-ride");
+                        cfp.setReplyWith("cfp"+System.currentTimeMillis());
+                        myAgent.send(cfp);
+
+                        mt = MessageTemplate.and(MessageTemplate.MatchConversationId("taxi-ride"),
+                                MessageTemplate.MatchInReplyTo(cfp.getReplyWith()));
+                        bestTaxi = null;
+                        repliesCnt = 0;
+                        step = 1;
+                    }
                     break;
 
-                // Seeking for a taxi state -> read the answers (LR)
                 case 1:
-                    // Receive all proposals/refusals from seller agents
-                    // We received all replies -> compare quickly (on the fly) and conclude the offer
+                    // Reception des propositions (distance) ou refus des taxis
                     ACLMessage reply = myAgent.receive(mt);
                     if (reply != null) {
-                        // Reply received
                         if (reply.getPerformative() == ACLMessage.PROPOSE) {
-                            TaxiOffer offer = null;
-                            try {
-                                offer = (TaxiOffer) reply.getContentObject();
-                            } catch (UnreadableException e) {
-                                throw new RuntimeException(e);
+                            double dist = Double.parseDouble(reply.getContent());
+                            if (bestTaxi == null || dist < bestDistance) {
+                                bestDistance = dist;
+                                bestTaxi = reply.getSender();
                             }
-
-                            int price = offer.getPrice();
-                            int eta = offer.getEta();
-
-                            if (bestSeller == null || price < bestPrice) {
-                                // This is the best offer at present
-                                bestPrice = price;
-                                bestSeller = reply.getSender();
-                            }
+                        }
+                        repliesCnt++;
+                        if (repliesCnt >= taxiAgents.length) {
+                            step = 2;
                         }
                     }
                     else {
-                        // Create new offer if none has been answered
-                        step = 0;
-                        break;
+                        block();
                     }
-
+                    break;
 
                 case 2:
-                    ACLMessage order = new ACLMessage(ACLMessage.ACCEPT_PROPOSAL);
-                    order.addReceiver(bestSeller);
-                    order.setContent(travelPoints);
-                    order.setConversationId("taxi-course");
-                    order.setReplyWith("order"+System.currentTimeMillis());
-                    myAgent.send(order);
-                    // Prepare the template to get the purchase order reply
-                    mt = MessageTemplate.and(MessageTemplate.MatchConversationId("taxi-course"),
-                            MessageTemplate.MatchInReplyTo(order.getReplyWith()));
-                    step = 3;
+                    if (bestTaxi == null) {
+                        // Tous les taxis sont occupes ou complets : nouvelle tentative plus tard
+                        step = 0;
+                        block(RETRY_DELAY);
+                    }
+                    else {
+                        // Reservation d'une place dans le taxi le plus proche
+                        ACLMessage order = new ACLMessage(ACLMessage.ACCEPT_PROPOSAL);
+                        order.addReceiver(bestTaxi);
+                        order.setContent(posX+","+posY);
+                        order.setConversationId("taxi-ride");
+                        order.setReplyWith("order"+System.currentTimeMillis());
+                        myAgent.send(order);
+
+                        mt = MessageTemplate.and(MessageTemplate.MatchConversationId("taxi-ride"),
+                                MessageTemplate.MatchInReplyTo(order.getReplyWith()));
+                        step = 3;
+                    }
                     break;
 
-                // Transition waiting for the taxi to arrive (T)
                 case 3:
-                    step = 4;
-                    break;
-
-                // On board (B)
-                case 4:
-                    // Receive the purchase order reply
+                    // Reponse du taxi a la demande d'embarquement
                     reply = myAgent.receive(mt);
                     if (reply != null) {
-                        // Purchase order reply received
                         if (reply.getPerformative() == ACLMessage.INFORM) {
-                            // Purchase successful. We can terminate
-                            System.out.println(" successfully purchased from agent "+reply.getSender().getName());
-                            System.out.println("Price = "+bestPrice);
-                            myAgent.doDelete();
+                            System.out.println("Client "+getLocalName()+" est monte dans le taxi "+
+                                    reply.getSender().getLocalName());
+                            // On attend desormais le message d'arrivee de ce taxi
+                            mt = MessageTemplate.and(
+                                    MessageTemplate.MatchSender(reply.getSender()),
+                                    MessageTemplate.MatchPerformative(ACLMessage.INFORM));
+                            step = 4;
                         }
                         else {
-                            System.out.println("Attempt failed: requested book already sold.");
+                            // Le taxi n'a plus de place disponible : on recommence la recherche
+                            System.out.println("Client "+getLocalName()+
+                                    " : place perdue, nouvelle recherche de taxi");
+                            step = 0;
                         }
+                    }
+                    else {
+                        block();
+                    }
+                    break;
 
+                case 4:
+                    // Attente de la notification d'arrivee a destination
+                    reply = myAgent.receive(mt);
+                    if (reply != null) {
+                        System.out.println("Client "+getLocalName()+" est arrive a destination");
+                        myAgent.doDelete();
                         step = 5;
                     }
                     else {
@@ -147,10 +178,7 @@ public class ClientAgent extends Agent {
         }
 
         public boolean done() {
-            if (step == 2 && bestSeller == null) {
-                System.out.println("Attempt failed: not available for sale");
-            }
-            return ((step == 2 && bestSeller == null) || step == 4);
+            return step == 5;
         }
-    }
+    }  // Fin de BookingPerformer
 }
