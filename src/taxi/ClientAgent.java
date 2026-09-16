@@ -1,8 +1,13 @@
 package taxi;
 
-public class ClientAgent {
+import jade.core.AID;
+import jade.core.Agent;
 
-    void setup() {
+public class ClientAgent extends Agent {
+
+    private AID[] taxiAgents;
+
+    protected void setup() {
 
     }
 }
