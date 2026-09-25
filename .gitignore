@@ -27,3 +27,8 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+### Other ###
+APDescription.txt
+MTPs-Main-Container.txt
+templates_cmd.txt
