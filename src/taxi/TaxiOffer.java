@@ -3,19 +3,25 @@ package taxi;
 import java.io.Serializable;
 
 public class TaxiOffer implements Serializable {
-    private int price;
-    private int eta;
+    private double price;
+    private double estimatedDuration;
+    private double estimatedDistance;
 
-    public TaxiOffer(int price, int eta) {
+    public TaxiOffer(double price, double estimatedDuration, double estimatedDistance) {
         this.price = price;
-        this.eta = eta;
+        this.estimatedDuration = estimatedDuration;
+        this.estimatedDistance = estimatedDistance;
     }
 
-    public int getPrice() {
+    public double getPrice() {
         return price;
     }
 
-    public int getEta() {
-        return eta;
+    public double getEstimatedDuration() {
+        return estimatedDuration;
+    }
+
+    public double getEstimatedDistance() {
+        return estimatedDistance;
     }
 }

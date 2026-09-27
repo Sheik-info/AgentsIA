@@ -22,32 +22,65 @@ import java.util.*;
  * - Simule le trajet puis informe les passagers de leur arrivee.
  */
 public class TaxiAgent extends Agent {
-
-    // Nombre maximal de places dans le taxi
+    // Constants of the environment
     private static final int CAPACITY = 4;
-    // Delai maximal d'attente avant le depart en ms  60 secondes
-    private static final long WAIT_TIME = 60000;
-    // Duree simulee du trajet en ms
-    private static final long TRIP_DURATION = 10000;
+    private static final long WAIT_TIME = 60000;    // constant max delay after first client confirmed
+    private static final int MAX_AUTONOMY = 4;
 
-    private double posX, posY;
+    // Taxi statistics for recap
+    private int numTrips = 0;
+    private int numClients = 0;
+    private double moneyMade = 0.0;
+    private double distanceMade = 0.0;
 
-    // Liste des clients actuellement a bord
-    private List<AID> passengers = new ArrayList<AID>();
+    /**
+     *  Believes B:
+     * - posX, posY
+     * - price, speed, autonomy
+     * - isTripOngoing, isReloadOngoing
+     * - proposedClients, confirmedClients, onboardClients, arrivedClients (all integers)
+    */
+    private double posX, posY;                      // variable (random) initial believes
+    private double price, speed, autonomy;          // static (random) initial believes
+    private boolean isTripOngoing, isReloadOngoing; // variable state
 
-    private boolean busy = false;
+    private int proposedClients, confirmedClients, onboardClients, arrivedClients;
+
+    /**
+     *  Intentions I:
+     * - tripDepartureWaypoints, tripDestinationWaypoints, tripClients
+     */
+    private List<Point2D> tripDepartureWaypoints;
+    private List<Point2D> tripDestinationWaypoints;
+    private List<AID> tripClients;
 
     // Reference vers le compte a rebours en cours, pour pouvoir l'annuler
     // si le taxi se remplit avant l'expiration des 60 secondes
     private DepartureWaker departureWaker;
 
-    protected void setup() {
-        // Position aleatoire de depart du taxi
+    private void initializeBeliefs() {
         posX = Math.random() * 100;
         posY = Math.random() * 100;
 
+        price = 20 + Math.random() * 30;
+        speed = 20 + Math.random() * 30;
+        autonomy = MAX_AUTONOMY;
 
-        // Enregistrement du service "taxi-service" aupres du DF
+        isTripOngoing = false;
+        isReloadOngoing = false;
+
+        proposedClients = 0;
+        confirmedClients = 0;
+        onboardClients = 0;
+        arrivedClients = 0;
+    }
+
+    private void initializeIntentions() {
+        tripWaypoints = new ArrayList<>();
+        tripClients = new ArrayList<AID>();
+    }
+
+    private void registerDFService(){
         DFAgentDescription dfd = new DFAgentDescription();
         dfd.setName(getAID());
         ServiceDescription sd = new ServiceDescription();
@@ -60,11 +93,31 @@ public class TaxiAgent extends Agent {
         catch (FIPAException fe) {
             fe.printStackTrace();
         }
+    }
 
-        // Repond aux demandes de course des clients
-        addBehaviour(new RequestsServer());
-        // Gere l'acceptation d'une course par un client (embarquement)
-        addBehaviour(new BoardingServer());
+    protected void setup() {
+        /**
+         *  Initial believes B0:
+         * - posX, posY
+         * - price, speed, autonomy
+         * - isTripOngoing, isReloadOngoing
+         * - CAPACITY, WAIT_TIME
+         * - proposedClients, confirmedClients, onboardClients, arrivedClients (all integers)
+         */
+        initializeBeliefs();
+
+        /**
+         *  Initial intentions I0:
+         * - tripWaypoints, tripClients
+         */
+        initializeIntentions();
+
+        // Register agent to the service 'taxi-service' (with the DF) on which the clients are communicating with taxis
+        registerDFService();
+
+        // Cyclic behaviors (persistant plans)
+        addBehaviour(new RequestsServer()); // Receive client request
+        addBehaviour(new ConfirmServer()); // Confirm client boarding
 
         // Seul le taxi lance "manuellement" (sans argument) ouvre la fenetre de
         // configuration TaxiGui, qui permet ensuite de creer le reste des taxis
@@ -95,35 +148,56 @@ public class TaxiAgent extends Agent {
         return Math.sqrt(dx*dx + dy*dy);
     }
 
+    private boolean canProposeClient(){
+        boolean isFull = proposedClients<CAPACITY;
+        return ((!isTripOngoing) && (!isFull) && (!isReloadOngoing));
+    }
+
+    private TaxiOffer createTaxiOffer(ClientRequest clientRequest){
+
+
+    }
+
+    private void addConfirmedClient(ACLMessage acceptClientReply){
+        confirmedClients += 1;
+        tripClients.add(acceptClientReply.getSender());
+        ClientAcceptance acceptance = acceptClientReply.getContentObject();
+        tripDepartureWaypoints.add(acceptance.getDeparturePoint());
+        tripDestinationWaypoints.add(acceptance.getDestinationPoint());
+    }
+
     /**
      Repond aux CFP envoyes par les clients avec la distance du taxi,
      sauf si le taxi est complet ou deja en course : dans ce cas REFUSE.
      */
     private class RequestsServer extends CyclicBehaviour {
         public void action() {
-            MessageTemplate mt = MessageTemplate.MatchPerformative(ACLMessage.CFP);
-            ACLMessage msg = myAgent.receive(mt);
-            if (msg != null) {
-                ACLMessage reply = msg.createReply();
-                if (!busy && passengers.size() < CAPACITY) {
+            // Receives the client CFP
+            MessageTemplate mt = MessageTemplate.and(
+                MessageTemplate.MatchConversationId("taxi-ride"),
+                MessageTemplate.MatchPerformative(ACLMessage.CFP));
+            ACLMessage cfpClient = myAgent.receive(mt);
+
+            if (cfpClient != null) {
+                ACLMessage proposeTaxiReply = cfpClient.createReply();
+                if (canProposeClient()) {
                     try {
-                        String[] coords = msg.getContent().split(",");
-                        double cx = Double.parseDouble(coords[0]);
-                        double cy = Double.parseDouble(coords[1]);
-                        double dist = distanceTo(cx, cy);
-                        reply.setPerformative(ACLMessage.PROPOSE);
-                        reply.setContent(String.valueOf(dist));
+                        ClientRequest clientRequest = cfpClient.getContentObject();
+                        proposeTaxiReply.setPerformative(ACLMessage.PROPOSE);
+                        proposeTaxiReply.setContentObject(createTaxiOffer(clientRequest));
+                        proposeTaxiReply.setReplyWith("propose"+System.currentTimeMillis());
                     }
                     catch (Exception e) {
-                        reply.setPerformative(ACLMessage.REFUSE);
-                        reply.setContent("bad-request");
+                        proposeTaxiReply.setPerformative(ACLMessage.REFUSE);
+                        proposeTaxiReply.setContent("bad-request");
                     }
                 }
                 else {
-                    reply.setPerformative(ACLMessage.REFUSE);
-                    reply.setContent("full");
+                    proposeTaxiReply.setPerformative(ACLMessage.REFUSE);
+                    proposeTaxiReply.setContent("full");
                 }
-                myAgent.send(reply);
+                myAgent.send(proposeTaxiReply);
+                proposedClients += 1;
             }
             else {
                 block();
@@ -134,32 +208,33 @@ public class TaxiAgent extends Agent {
     /**
      Gere l'embarquement des clients qui acceptent la proposition du taxi.
      */
-    private class BoardingServer extends CyclicBehaviour {
+    private class ConfirmServer extends CyclicBehaviour {
         public void action() {
-            MessageTemplate mt = MessageTemplate.MatchPerformative(ACLMessage.ACCEPT_PROPOSAL);
-            ACLMessage msg = myAgent.receive(mt);
-            if (msg != null) {
-                ACLMessage reply = msg.createReply();
-                if (!busy && passengers.size() < CAPACITY) {
-                    passengers.add(msg.getSender());
-                    reply.setPerformative(ACLMessage.INFORM);
-                    reply.setContent("boarded");
-                    System.out.println("Taxi "+getLocalName()+" : "+msg.getSender().getLocalName()+
-                            " est monte a bord ("+passengers.size()+"/"+CAPACITY+")");
+            MessageTemplate mt = MessageTemplate.and(
+                MessageTemplate.and(
+                    MessageTemplate.MatchConversationId("taxi-ride"),
+                    MessageTemplate.MatchInReplyTo(proposeTaxiReply.getReplyWith())),
+                MessageTemplate.MatchPerformative(ACLMessage.ACCEPT_PROPOSAL));
+            ACLMessage acceptClientReply = myAgent.receive(mt);
 
-                    // Demarre le compte a rebours de 60s au premier client
-                    if (passengers.size() == 1) {
-                        departureWaker = new DepartureWaker(myAgent, WAIT_TIME);
-                        myAgent.addBehaviour(departureWaker);
-                    }
+            if (acceptClientReply != null) {
+                addConfirmedClient(acceptClientReply);
+                System.out.println("Taxi "+getLocalName()+": "+acceptClientReply.getSender().getLocalName()+
+                        " confirmed reservation. Confirmed clients: ("+tripClients.size()+"/"+CAPACITY+")");
 
-                    // Depart immediat si le taxi est complet
-                    if (passengers.size() == CAPACITY) {
-                        if (departureWaker != null) {
-                            myAgent.removeBehaviour(departureWaker);
-                        }
-                        depart();
+                // Demarre le compte a rebours de 60s au premier client
+                if (tripClients.size() == 1) {
+                    departureWaker = new DepartureWaker(myAgent, WAIT_TIME);
+                    myAgent.addBehaviour(departureWaker);
+                }
+
+                // Depart immediat si le taxi est complet
+                if (tripClients.size() == CAPACITY) {
+                    if (departureWaker != null) {
+                        myAgent.removeBehaviour(departureWaker);
                     }
+                    depart();
+                }
                 }
                 else {
                     // Le taxi s'est rempli ou est parti entre-temps
