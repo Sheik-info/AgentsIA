@@ -1,6 +1,8 @@
 package taxi;
 
-public class Point2D {
+import java.io.Serializable;
+
+public class Point2D implements Serializable {
     private double x;
     private double y;
 
@@ -19,6 +21,6 @@ public class Point2D {
 
     @Override
     public String toString() {
-        return "(" + x + "," + y + ")";
+        return "(" + String.format("%.1f", x) + ", " + String.format("%.1f", y) + ")";
     }
 }

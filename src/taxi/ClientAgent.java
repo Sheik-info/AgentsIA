@@ -9,6 +9,9 @@ import jade.domain.DFService;
 import jade.domain.FIPAException;
 import jade.domain.FIPAAgentManagement.DFAgentDescription;
 import jade.domain.FIPAAgentManagement.ServiceDescription;
+import jade.lang.acl.UnreadableException;
+
+import java.io.IOException;
 
 /**
  * Agent representant un client.
@@ -24,49 +27,52 @@ public class ClientAgent extends Agent {
 
     /**
      *  Believes B:
-     * - startX, startY
+     * - startWaypoint
      * - maxDistanceIncrease
      */
-    private double startX, startY, maxDistanceIncrease;   // static (random) initial believes
+    // static (random) initial believes
+    private Point2D startWaypoint;
+    private double maxDistanceIncrease;
 
     /**
      *  Intentions I:
      * - endX, endY
      */
-    private double endX, endY;
+    private Point2D endWaypoint;
 
     private void initializeBeliefs() {
-        startX = Math.random() * 100;
-        startY = Math.random() * 100;
-
+        startWaypoint = new Point2D(
+            Math.random() * 100,
+            Math.random() * 100
+        );
         maxDistanceIncrease = 1.0 + Math.random();
     }
 
     private void initializeIntentions() {
-        endX = Math.random() * 100;
-        endY = Math.random() * 100;
-
-        maxDistanceIncrease = 1.0 + Math.random();
+        endWaypoint = new Point2D(
+            Math.random() * 100,
+            Math.random() * 100
+        );
     }
 
     protected void setup() {
         /**
          *  Initial believes B0:
-         * - startX, startY
+         * - startWaypoint
          * - maxDistanceIncrease
          */
         initializeBeliefs();
 
         /**
          *  Initial believes I0:
-         * - endX, endY
+         * - endWaypoint
          */
         initializeIntentions();
 
-        System.out.println("Client "+getLocalName()+" created at position ("+
-                String.format("%.1f", startX)+","+String.format("%.1f", startY)+
-                ") with the intention to go at destination ("+
-                String.format("%.1f", endX)+","+String.format("%.1f", endY)+")");
+        System.out.println("Client "+getLocalName()+" created at position "
+            + startWaypoint.toString()
+            + " with the intention to go at destination "
+            + endWaypoint.toString());
 
         addBehaviour(new BookingPerformer());
     }
@@ -91,17 +97,31 @@ public class ClientAgent extends Agent {
             switch (step) {
                 case 0:
                     // Discover taxis and send CPF
-                    requestTaxi();
+                    try {
+                        requestTaxi();
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
                     break;
 
                 case 1:
                     // Collect offers and chose the best one (on the fly)
-                    collectOffers();
+                    try {
+                        collectOffers();
+                    } catch (UnreadableException e) {
+                        throw new RuntimeException(e);
+                    }
                     break;
 
                 case 2:
                     // Accept the best taxi offer (if at least 1 offer received)
-                    confirmTaxi();
+                    try {
+                        confirmTaxi();
+                    } catch (UnreadableException e) {
+                        throw new RuntimeException(e);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
                     break;
 
                 case 3:
@@ -120,7 +140,7 @@ public class ClientAgent extends Agent {
             return step == 5;
         }
 
-        public void requestTaxi(){
+        public void requestTaxi() throws IOException {
             // Search the service 'taxi-service' on which the taxis have been registered on creation -> discover the existing taxis
             DFAgentDescription template = new DFAgentDescription();
             ServiceDescription sd = new ServiceDescription();
@@ -144,8 +164,8 @@ public class ClientAgent extends Agent {
             }
             else {
                 ClientRequest request = new ClientRequest(
-                    new Point2D(startX, startY),
-                    new Point2D(endX, endY),
+                    startWaypoint,
+                    endWaypoint,
                     maxDistanceIncrease
                 );
 
@@ -164,24 +184,51 @@ public class ClientAgent extends Agent {
                     MessageTemplate.MatchConversationId("taxi-ride"),
                     MessageTemplate.MatchInReplyTo(cfpClient.getReplyWith()));
                 bestTaxiReply = null;
+                bestScore = Double.MAX_VALUE;
                 repliesCnt = 0;
                 step = 1;
             }
         }
 
-        public void collectOffers(){
+        public void collectOffers() throws UnreadableException {
             ACLMessage proposeTaxiReply = myAgent.receive(mt);
             if (proposeTaxiReply != null) {
                 if (proposeTaxiReply.getPerformative() == ACLMessage.PROPOSE) {
-                    TaxiOffer offer = proposeTaxiReply.getContentObject();
+                    TaxiOffer offer = (TaxiOffer) proposeTaxiReply.getContentObject();
                     double score = taxiOfferHeuristic(offer);
-                    if (bestTaxiReply == null || score < bestScore) {
+                    if (bestTaxiReply == null || score < bestScore) {   // lowest is best
+                        if (bestTaxiReply != null){
+                            // Refuse the former offer that is no longer the best
+                            ACLMessage rejectFormerBestClientReply = bestTaxiReply.createReply();
+                            rejectFormerBestClientReply.setPerformative(ACLMessage.REJECT_PROPOSAL);
+                            rejectFormerBestClientReply.setContent("no-longer-best-offer ("
+                                + String.format("%.1f", score)
+                                + " [new: " + proposeTaxiReply.getSender().getLocalName() + "] < [former] "
+                                + String.format("%.1f", bestScore) + ")");
+                            myAgent.send(rejectFormerBestClientReply);
+                        }
                         bestScore = score;
                         bestTaxiReply = proposeTaxiReply;
                     }
+                    else {
+                        // Refuse the offers that are not the best
+                        ACLMessage rejectClientReply = proposeTaxiReply.createReply();
+                        rejectClientReply.setPerformative(ACLMessage.REJECT_PROPOSAL);
+                        rejectClientReply.setContent("not-best-offer ("
+                            + String.format("%.1f", bestScore)
+                            + " [former: " + bestTaxiReply.getSender().getLocalName() + "] < [new] "
+                            + String.format("%.1f", score) + ")");
+                        myAgent.send(rejectClientReply);
+                    }
                 }
-                else if (proposeTaxiReply.getPerformative() == ACLMessage.REFUSE) {} // Taxi refused the offer
+                else if (proposeTaxiReply.getPerformative() == ACLMessage.REFUSE) {
+                    System.out.println("Taxi "+proposeTaxiReply.getSender().getLocalName()
+                        + " refused CFP from client " + getLocalName()
+                        +" for reason: "+ proposeTaxiReply.getContent());
+                    // Taxi refused the offer
+                }
                 repliesCnt++;
+                System.out.println("Client " + getLocalName() + " received " + repliesCnt + "/" + taxiAgents.length + " replies to its CFP");
 
                 if (repliesCnt >= taxiAgents.length) {  // Condition for stoping to look for new offers (all received or out-of-time fallback)
                     step = 2;
@@ -192,16 +239,21 @@ public class ClientAgent extends Agent {
             }
         }
 
-        public void confirmTaxi(){
+        public void confirmTaxi() throws UnreadableException, IOException {
             if (bestTaxiReply == null) {
                 // No taxi available -> retry later
                 step = 0;
                 block(RETRY_DELAY);
             }
             else {
+                // Remind the trip waypoints the to taxi and the estimated duration
+                // (avoids memory bottleneck: if each taxi had to store the waypoints
+                // of each client at CFP time, that would cause a O(T*C) memory complexity)
+                TaxiOffer offer = (TaxiOffer) bestTaxiReply.getContentObject();
                 ClientAcceptance acceptance = new ClientAcceptance(
-                    new Point2D(startX, startY),
-                    new Point2D(endX, endY)
+                    startWaypoint,
+                    endWaypoint,
+                    offer.getEstimatedDuration()
                 );
 
                 // Confirm offer acceptance to the best found taxi
@@ -222,14 +274,12 @@ public class ClientAgent extends Agent {
         }
 
         public void enterTaxi(){
-            ACLMessage ... = myAgent.receive(mt);
-            if (reply != null) {
-                if (reply.getPerformative() == ACLMessage.INFORM) {
-                    System.out.println("Client "+getLocalName()+" entered the taxi "+ reply.getSender().getLocalName());
+            ACLMessage entrance = myAgent.receive(mt);
+            if ((entrance != null) && entrance.getContent().equals("entrance")){
+                System.out.println("Client "+getLocalName()+" entered the taxi "+ entrance.getSender().getLocalName());
 
-                    // After entering the taxi, wait for the taxi to inform of its arrival at destination (same message template)
-                    step = 4;
-                }
+                // After entering the taxi, wait for the taxi to inform of its arrival at destination (same message template)
+                step = 4;
             }
             else {
                 block();  // Taxi not arrived yet at client start point
@@ -237,28 +287,26 @@ public class ClientAgent extends Agent {
         }
 
         public void exitTaxi(){
-            reply = myAgent.receive(mt);
-            if (reply != null) {
-                if (reply.getPerformative() == ACLMessage.INFORM) {
-                    System.out.println("Client " + getLocalName() + " arrived at destination");
+            ACLMessage exit = myAgent.receive(mt);
+            if ((exit != null) && exit.getContent().equals("exit")){
+                System.out.println("Client "+getLocalName()+" exit the taxi "+ exit.getSender().getLocalName());
 
-                    // Remove the client agent after its final arrival at destination
-                    myAgent.doDelete();
-                    step = 5;
-                }
+                // Remove the client agent after its final arrival at destination
+                myAgent.doDelete();
+                step = 5;
             }
             else {
                 block();  // Taxi not arrived yet at client destination
             }
         }
 
-    }  // Fin de BookingPerformer
+    }
 
     public double taxiOfferHeuristic(TaxiOffer offer){
-        double price = offer.getPrice();
+        double hourlyPrice = offer.getHourlyPrice();
         double distance = offer.getEstimatedDistance();
         double duration = offer.getEstimatedDuration();
 
-        return price * Math.pow(duration, 1.5);
+        return hourlyPrice * Math.pow(duration, 1.5);
     }
 }
