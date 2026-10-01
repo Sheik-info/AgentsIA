@@ -23,6 +23,7 @@ import java.io.IOException;
  */
 public class ClientAgent extends Agent {
     // Constants of the environment
+    private static final int STARTUP_DELAY = 3000;
     private static final long RETRY_DELAY = 5000;
 
     /**
@@ -69,12 +70,18 @@ public class ClientAgent extends Agent {
          */
         initializeIntentions();
 
-        System.out.println("Client "+getLocalName()+" created at position "
+        System.out.println("----- Client "+getLocalName()+" created at position "
             + startWaypoint.toString()
             + " with the intention to go at destination "
             + endWaypoint.toString());
 
-        addBehaviour(new BookingPerformer());
+        // (add a tiny delay before making the agent act behaviors -> let sniffer/introspector agents monitor it)
+        addBehaviour(new WakerBehaviour(this, STARTUP_DELAY) {
+            @Override
+            protected void onWake() {
+                addBehaviour(new BookingPerformer());
+            }
+        });
     }
 
     protected void takeDown() {
@@ -182,7 +189,12 @@ public class ClientAgent extends Agent {
                 // Bind for the taxis replies (replies to the exact cfp message)
                 mt = MessageTemplate.and(
                     MessageTemplate.MatchConversationId("taxi-ride"),
-                    MessageTemplate.MatchInReplyTo(cfpClient.getReplyWith()));
+                    MessageTemplate.and(
+                        MessageTemplate.MatchInReplyTo(cfpClient.getReplyWith()),
+                        MessageTemplate.or(
+                            MessageTemplate.MatchPerformative(ACLMessage.PROPOSE),
+                            MessageTemplate.MatchPerformative(ACLMessage.REFUSE)
+                        )));
                 bestTaxiReply = null;
                 bestScore = Double.MAX_VALUE;
                 repliesCnt = 0;
@@ -227,11 +239,14 @@ public class ClientAgent extends Agent {
                         +" for reason: "+ proposeTaxiReply.getContent());
                     // Taxi refused the offer
                 }
-                repliesCnt++;
-                System.out.println("Client " + getLocalName() + " received " + repliesCnt + "/" + taxiAgents.length + " replies to its CFP");
 
+                repliesCnt++;
                 if (repliesCnt >= taxiAgents.length) {  // Condition for stoping to look for new offers (all received or out-of-time fallback)
+                    System.out.println("***** Client " + getLocalName() + " received all " + repliesCnt + "/" + taxiAgents.length + " replies to its CFP");
                     step = 2;
+                }
+                else {
+                    System.out.println("Client " + getLocalName() + " received " + repliesCnt + "/" + taxiAgents.length + " replies to its CFP");
                 }
             }
             else {

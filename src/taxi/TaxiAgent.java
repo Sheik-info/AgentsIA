@@ -25,6 +25,7 @@ import java.util.List;
  */
 public class TaxiAgent extends Agent {
     // Constants of the environment
+    private static final int STARTUP_DELAY = 2000;
     private static final int CAPACITY = 4;
     private static final long WAKER_TIME = 5000;    // constant max delay after first client confirmed
     private static final int MAX_AUTONOMY = 4;
@@ -121,15 +122,20 @@ public class TaxiAgent extends Agent {
          */
         initializeIntentions();
 
-        System.out.println("Taxi "+getLocalName()+" created at position "
-                + lastWaypoint.toString());
+        System.out.println("----- Taxi "+getLocalName()+" created at position " + lastWaypoint.toString());
 
         // Register agent to the service 'taxi-service' (with the DF) on which the clients are communicating with taxis
         registerDFService();
 
         // Cyclic behaviors (persistant plans)
-        addBehaviour(new RequestsServer()); // Receive client request
-        addBehaviour(new ConfirmServer()); // Confirm client boarding
+        // (add a tiny delay before making the agent act behaviors -> let sniffer/introspector agents monitor it)
+        addBehaviour(new WakerBehaviour(this, STARTUP_DELAY) {
+            @Override
+            protected void onWake() {
+                addBehaviour(new RequestsServer()); // Receive client request
+                addBehaviour(new ConfirmServer()); // Confirm client boarding
+            }
+        });
 
         // Seul le taxi lance "manuellement" (sans argument) ouvre la fenetre de
         // configuration TaxiGui, qui permet ensuite de creer le reste des taxis
@@ -282,11 +288,32 @@ public class TaxiAgent extends Agent {
     private class ConfirmServer extends CyclicBehaviour {
         public void action() {
             // Receive the client Acceptance (or Refusal) of the proposal
-            MessageTemplate mt = MessageTemplate.MatchConversationId("taxi-ride");
+            MessageTemplate mt = MessageTemplate.and(
+                MessageTemplate.MatchConversationId("taxi-ride"),
+                MessageTemplate.or(
+                    MessageTemplate.MatchPerformative(ACLMessage.ACCEPT_PROPOSAL),
+                    MessageTemplate.MatchPerformative(ACLMessage.REJECT_PROPOSAL)
+                ));
+
+            // Check that the message is in response to one of the proposals sent by the taxi
+            MessageTemplate mtProposals = null;
+            for (String proposalId : activeProposals) {
+                if (mtProposals == null){
+                    mtProposals = MessageTemplate.MatchInReplyTo(proposalId);
+                }
+                else {
+                    mt = MessageTemplate.or(
+                        mtProposals,
+                        MessageTemplate.MatchInReplyTo(proposalId)
+                    );
+                }
+            }
+            if (mtProposals != null) {
+                mt = MessageTemplate.and(mt, mtProposals);
+            }
             ACLMessage acceptClientReply = myAgent.receive(mt);
 
-            // Actually part of the massage template but JADE doesn't implement this kind of check in message template
-            if ((acceptClientReply != null) && (activeProposals.contains(acceptClientReply.getInReplyTo()))) {
+            if ((acceptClientReply != null)){
                 activeProposals.remove(acceptClientReply.getInReplyTo());
 
                 if (acceptClientReply.getPerformative() == ACLMessage.ACCEPT_PROPOSAL) {
@@ -296,7 +323,7 @@ public class TaxiAgent extends Agent {
                     } catch (UnreadableException e) {
                         throw new RuntimeException(e);
                     }
-                    System.out.println("Taxi " + getLocalName() + ": " + acceptClientReply.getSender().getLocalName() +
+                    System.out.println("+++++ Taxi " + getLocalName() + ": " + acceptClientReply.getSender().getLocalName() +
                             " confirmed reservation. Confirmed clients: (" + tripClients.size() + "/" + CAPACITY + ")");
 
                     // Starts the countdown before departure when the first client confirms
@@ -371,7 +398,7 @@ public class TaxiAgent extends Agent {
                 addBehaviour(new OneClientExitBehaviour(myAgent, nextDuration()));
             }
             else {
-                // Still other clients to seek
+                // Still other clients to seek -> go to the next client departure
                 nextWaypoint = tripDepartureWaypoints.get(onboardClients);
                 addBehaviour(new OneClientEntranceBehaviour(myAgent, nextDuration()));
             }
@@ -401,8 +428,8 @@ public class TaxiAgent extends Agent {
                 arrival();
             }
             else {
-                // Still other clients to lift
-                nextWaypoint = tripDepartureWaypoints.get(arrivedClients);
+                // Still other clients to lift -> go to the next clients destination
+                nextWaypoint = tripDestinationWaypoints.get(arrivedClients);
                 addBehaviour(new OneClientExitBehaviour(myAgent, nextDuration()));
             }
         }
@@ -422,12 +449,14 @@ public class TaxiAgent extends Agent {
 
         proposedClients = 0;
         confirmedClients = 0;
+        onboardClients = 0;
         arrivedClients = 0;
         billOfClients = new ArrayList<Double>();
         tripDepartureWaypoints = new ArrayList<Point2D>();
         tripDestinationWaypoints = new ArrayList<Point2D>();
         tripClients = new ArrayList<AID>();
 
+        departureWaker = null;  // Reset the departureWaker to allow creating a new one for the next trip
         isTripOngoing = false;
     }
 }
