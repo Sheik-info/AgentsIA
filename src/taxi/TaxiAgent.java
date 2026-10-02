@@ -28,13 +28,18 @@ public class TaxiAgent extends Agent {
     private static final int STARTUP_DELAY = 2000;
     private static final int CAPACITY = 4;
     private static final long WAKER_TIME = 5000;    // constant max delay after first client confirmed
-    private static final int MAX_AUTONOMY = 4;
+    private static final int MAX_AUTONOMY = 500;
+    private static final int MIN_AUTONOMY = 100;
+    private static final int RELOAD_TIME = 4000;
+    private static final int MAX_TRIPS_BEFORE_RELOAD = 4000;
+    private static final Point2D RELOAD_POINT = new Point2D(50, 50);
 
     // Taxi statistics for recap
     private int numTrips = 0;
     private int numClients = 0;
-    private double moneyMade = 0.0;
-    private double distanceMade = 0.0;
+    private double totalMoneyMade = 0.0;
+    private double lastTripDistance = 0.0;
+    private double totalDistanceMade = 0.0;
     private List<Double> billOfClients = new ArrayList<Double>();
 
     /**
@@ -43,12 +48,14 @@ public class TaxiAgent extends Agent {
      * - hourlyPrice, speed, autonomy
      * - isTripOngoing, isReloadOngoing
      * - proposedClients, confirmedClients, onboardClients, arrivedClients (all integers)
+     * - tripsBeforeReload
     */
     private Point2D lastWaypoint;                   // variable (random) initial believes
     private double hourlyPrice, speed, autonomy;          // static (random) initial believes
     private boolean isTripOngoing, isReloadOngoing; // variable state
 
     private int proposedClients, confirmedClients, onboardClients, arrivedClients;
+    private int tripsBeforeReload;
 
     /**
      *  Intentions I:
@@ -82,6 +89,8 @@ public class TaxiAgent extends Agent {
         confirmedClients = 0;
         onboardClients = 0;
         arrivedClients = 0;
+
+        tripsBeforeReload = MAX_TRIPS_BEFORE_RELOAD;
     }
 
     private void initializeIntentions() {
@@ -113,6 +122,7 @@ public class TaxiAgent extends Agent {
          * - isTripOngoing, isReloadOngoing
          * - CAPACITY, WAIT_TIME
          * - proposedClients, confirmedClients, onboardClients, arrivedClients (all integers)
+         * - tripsBeforeReload
          */
         initializeBeliefs();
 
@@ -184,43 +194,57 @@ public class TaxiAgent extends Agent {
         return (int) Math.ceil(distance2Points2D(lastWaypoint, nextWaypoint) / speed);
     }
 
-    public record OfferResult(TaxiOffer taxiOffer, boolean distanceCondition) {}
+    public record OfferResult(TaxiOffer taxiOffer, boolean clientDistanceCondition, boolean taxiAutonomyCondition) {}
 
     private OfferResult createTaxiOffer(ClientRequest clientRequest){
         // Propose the ride to the client only if the trip doesn't extend too much the
         // distance from client departure and arrival point
         // There is a rick that the trip gets extended by another client booking meanwhile
         // but that's the taxi issue since the offer doesn't change
-        double estimatedDistance;
-        boolean distanceCondition;
+        double newClientDistance, distanceBeforeReload;
+        boolean clientDistanceCondition;
+        boolean taxiAutonomyCondition;
 
         Point2D newClientDeparture = clientRequest.getDeparturePoint();
         Point2D newClientDestination = clientRequest.getDestinationPoint();
 
         if (confirmedClients == 0){
-            estimatedDistance = distance2Points2D(newClientDeparture, newClientDestination);
-            distanceCondition = true;
+            newClientDistance = distance2Points2D(newClientDeparture, newClientDestination);
+            clientDistanceCondition = true;
+
+            distanceBeforeReload = distance2Points2D(lastWaypoint, newClientDeparture)
+                + newClientDistance
+                + distance2Points2D(newClientDestination, RELOAD_POINT);
         }
         else {
+            Point2D firstClientDeparture = tripDepartureWaypoints.getFirst();
+            Point2D lastClientDeparture = tripDepartureWaypoints.getLast();
             Point2D firstClientDestination = tripDestinationWaypoints.getFirst();
             Point2D lastClientDestination = tripDestinationWaypoints.getLast();
 
-            estimatedDistance = distance2Points2D(newClientDeparture, firstClientDestination)
+            newClientDistance = distance2Points2D(newClientDeparture, firstClientDestination)
                 + distancePath(tripDestinationWaypoints)
                 + distance2Points2D(lastClientDestination, newClientDestination);
 
+            distanceBeforeReload = distance2Points2D(lastWaypoint, firstClientDeparture)
+                + distancePath(tripDepartureWaypoints)
+                + distance2Points2D(lastClientDeparture, newClientDeparture)
+                + newClientDistance
+                + distance2Points2D(newClientDestination, RELOAD_POINT);
+
             double minimalDistance = distance2Points2D(newClientDeparture, newClientDestination);
-            distanceCondition = estimatedDistance <= minimalDistance * clientRequest.getMaxDistanceIncrease();
+            clientDistanceCondition = (newClientDistance <= minimalDistance * clientRequest.getMaxDistanceIncrease());
         }
 
-        double estimatedDuration = estimatedDistance / speed;
+        taxiAutonomyCondition = (autonomy >= distanceBeforeReload);
+        double estimatedDuration = newClientDistance / speed;
         TaxiOffer taxiOffer = new TaxiOffer(
-                hourlyPrice,
+            hourlyPrice,
             estimatedDuration,
-            estimatedDistance
+            newClientDistance
         );
 
-        return new OfferResult(taxiOffer, distanceCondition);
+        return new OfferResult(taxiOffer, clientDistanceCondition, taxiAutonomyCondition);
     }
 
     private void addConfirmedClient(ACLMessage acceptClientReply) throws UnreadableException {
@@ -251,7 +275,7 @@ public class TaxiAgent extends Agent {
                     try {
                         ClientRequest clientRequest = (ClientRequest) cfpClient.getContentObject();
                         OfferResult offerResult = createTaxiOffer(clientRequest);
-                        if (offerResult.distanceCondition()) {
+                        if ((offerResult.clientDistanceCondition()) && (offerResult.taxiAutonomyCondition())){
                             proposeTaxiReply.setPerformative(ACLMessage.PROPOSE);
                             proposeTaxiReply.setContentObject(offerResult.taxiOffer());
                             String proposeTaxiReplyWith = "propose"+System.currentTimeMillis();
@@ -259,10 +283,15 @@ public class TaxiAgent extends Agent {
                             activeProposals.add(proposeTaxiReplyWith);
                             proposedClients += 1;
                         }
-                        else {
+                        else if (!offerResult.clientDistanceCondition()) {
                             // Path too extended: following the path of the previous clients makes the trip too long for new client
                             proposeTaxiReply.setPerformative(ACLMessage.REFUSE);
                             proposeTaxiReply.setContent("path-too-extended");
+                        }
+                        else if (!offerResult.taxiAutonomyCondition()) {
+                            // Taxi has not enough autonomy: would be unable to reach reload point after dropping new client
+                            proposeTaxiReply.setPerformative(ACLMessage.REFUSE);
+                            proposeTaxiReply.setContent("not-enough-autonomy");
                         }
                     }
                     catch (Exception e) {
@@ -389,7 +418,8 @@ public class TaxiAgent extends Agent {
             entrance.setContent("entrance");
             myAgent.send(entrance);
 
-            distanceMade += distance2Points2D(lastWaypoint, nextWaypoint);
+            totalDistanceMade += distance2Points2D(lastWaypoint, nextWaypoint);
+            lastTripDistance += distance2Points2D(lastWaypoint, nextWaypoint);
             onboardClients += 1;
             lastWaypoint = nextWaypoint;
             if (onboardClients == confirmedClients) {
@@ -417,8 +447,9 @@ public class TaxiAgent extends Agent {
             exit.setContent("exit");
             myAgent.send(exit);
 
-            moneyMade += billOfClients.get(arrivedClients);
-            distanceMade += distance2Points2D(lastWaypoint, nextWaypoint);
+            totalMoneyMade += billOfClients.get(arrivedClients);
+            totalDistanceMade += distance2Points2D(lastWaypoint, nextWaypoint);
+            lastTripDistance += distance2Points2D(lastWaypoint, nextWaypoint);
             onboardClients -= 1;
             arrivedClients += 1;
 
@@ -438,25 +469,62 @@ public class TaxiAgent extends Agent {
     // End of a trip -> update and possibly reload before next trip
     private void arrival() {
         numTrips += 1;
+        tripsBeforeReload -= 1;
         numClients += arrivedClients;
+        autonomy -= lastTripDistance;
 
         System.out.println("Taxi "+getLocalName()+": finished its trip. New position: " + lastWaypoint.toString() + "\n" +
             "Stats of taxi "+getLocalName()+":\n"
             + "  - Num trips: "+numTrips+"\n"
-            + "  - Num total clients: "+numClients+"\n"
-            + "  - Total distance made: "+String.format("%.1f", distanceMade)+"\n"
-            + "  - Total money made: "+String.format("%.1f", moneyMade));
+            + "  - Num total clients: "+numClients+" (+"+arrivedClients+")\n"
+            + "  - Total distance made: "+String.format("%.1f", totalDistanceMade)+" (+"+String.format("%.1f", lastTripDistance)+")\n"
+            + "  - Total money made: "+String.format("%.1f", totalMoneyMade)+" (+"+String.format("%.1f", billOfClients.stream().mapToDouble(Double::doubleValue).sum())+")\n"
+            + "  - Remaining fuel: "+String.format("%.1f", autonomy));
+
 
         proposedClients = 0;
         confirmedClients = 0;
         onboardClients = 0;
         arrivedClients = 0;
+        lastTripDistance = 0.0;
         billOfClients = new ArrayList<Double>();
         tripDepartureWaypoints = new ArrayList<Point2D>();
         tripDestinationWaypoints = new ArrayList<Point2D>();
         tripClients = new ArrayList<AID>();
 
         departureWaker = null;  // Reset the departureWaker to allow creating a new one for the next trip
+
+        if ((autonomy < MIN_AUTONOMY) || (tripsBeforeReload == 0)) {
+            reload();
+        }
+
         isTripOngoing = false;
+    }
+
+    private void reload() {
+        if ((autonomy < MIN_AUTONOMY)) {
+            System.out.println("Taxi " + getLocalName() + " is running out of fuel (autonomy = " + String.format("%.1f", autonomy) + " < " + MIN_AUTONOMY + " = min autonomy) --> reloading...");
+        }
+        else if ((tripsBeforeReload == 0)){
+            System.out.println("Taxi " + getLocalName() + "reloads after the maximum "+MAX_TRIPS_BEFORE_RELOAD+" trips --> reloading");
+        }
+        // Reload requires going to reload point and then spending the additional reload time
+        isReloadOngoing = true;
+        nextWaypoint = RELOAD_POINT;
+        long reloadDuration = nextDuration() + RELOAD_TIME;
+        addBehaviour(new ReloadFuelBehaviour(this, reloadDuration));
+    }
+
+    private class ReloadFuelBehaviour extends WakerBehaviour {
+        public ReloadFuelBehaviour(Agent a, long timeout) {
+            super(a, timeout);
+        }
+        protected void onWake() {
+            autonomy = MAX_AUTONOMY;
+            isReloadOngoing = false;
+            lastWaypoint = RELOAD_POINT;
+            tripsBeforeReload = MAX_TRIPS_BEFORE_RELOAD;
+            System.out.println("Taxi "+getLocalName()+" reloaded");
+        }
     }
 }
