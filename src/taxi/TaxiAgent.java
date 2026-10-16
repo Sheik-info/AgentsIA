@@ -259,11 +259,11 @@ public class TaxiAgent extends Agent {
 
     /**
      Repond aux CFP envoyes par les clients avec la distance du taxi,
-     sauf si le taxi est complet ou deja en course : dans ce cas REFUSE.
+     sauf si le taxi est complet ou deja en course, dans ce cas REFUSE.
      */
     private class RequestsServer extends CyclicBehaviour {
         public void action() {
-            // Receive the client CFP
+            // reçoit le client
             MessageTemplate mt = MessageTemplate.and(
                 MessageTemplate.MatchConversationId("taxi-ride"),
                 MessageTemplate.MatchPerformative(ACLMessage.CFP));

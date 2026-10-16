@@ -112,7 +112,7 @@ public class ClientAgent extends Agent {
                     break;
 
                 case 1:
-                    // Collect offers and chose the best one (on the fly)
+                    // Collect offers and chose the best one
                     try {
                         collectOffers();
                     } catch (UnreadableException e) {
