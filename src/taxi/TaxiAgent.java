@@ -301,7 +301,7 @@ public class TaxiAgent extends Agent {
                 }
                 else {
                     proposeTaxiReply.setPerformative(ACLMessage.REFUSE);
-                    proposeTaxiReply.setContent("full");
+                    proposeTaxiReply.setContent("not-available");
                 }
                 myAgent.send(proposeTaxiReply);
             }
